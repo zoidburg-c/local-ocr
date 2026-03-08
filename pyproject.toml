@@ -9,7 +9,10 @@ requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
-    "vllm>=0.7",
+    "transformers>=4.45",
+    "torch>=2.4",
+    "accelerate>=0.34",
+    "qwen-vl-utils>=0.0.8",
     "PyMuPDF>=1.25",
     "httpx>=0.28",
     "Pillow>=11.0",
