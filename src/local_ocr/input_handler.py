@@ -24,6 +24,21 @@ def pdf_to_images(
     return images
 
 
+def open_pdf(pdf_path: str | Path) -> "fitz.Document":
+    """Open a PDF and return the fitz Document (caller must close)."""
+    return fitz.open(str(pdf_path))
+
+
+def pdf_page_to_image(
+    page: "fitz.Page", dpi: int = 300
+) -> Image.Image:
+    """Render a single fitz.Page to a PIL Image."""
+    zoom = dpi / 72
+    matrix = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=matrix)
+    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+
 def fetch_url(url: str) -> dict:
     """Fetch a URL and return its content with type info.
 

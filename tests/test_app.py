@@ -1,10 +1,12 @@
 # tests/test_app.py
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from httpx import AsyncClient, ASGITransport
 from PIL import Image
 import io
+import shutil
+from pathlib import Path
 
 
 def _make_test_image_bytes() -> bytes:
@@ -15,6 +17,17 @@ def _make_test_image_bytes() -> bytes:
 
 
 MOCK_MARKDOWN = "# Question 1\n\nSolve $x^2 = 4$\n\n$$x = \\pm 2$$"
+
+
+@pytest.fixture(autouse=True)
+def clean_output_dir():
+    """Remove output dir before and after each test."""
+    out = Path("output")
+    if out.exists():
+        shutil.rmtree(out)
+    yield
+    if out.exists():
+        shutil.rmtree(out)
 
 
 @pytest.fixture
@@ -49,28 +62,35 @@ async def test_ocr_image(mock_engine):
     assert len(data["pages"]) == 1
     assert data["pages"][0]["page_number"] == 1
     assert "$x^2 = 4$" in data["pages"][0]["markdown"]
+    assert data["output_path"] == "output/test/test.md"
+    assert Path("output/test/test.md").exists()
 
 
 async def test_ocr_pdf(mock_engine):
     from local_ocr.app import app
 
-    with patch("local_ocr.app.pdf_to_images") as mock_pdf:
-        mock_pdf.return_value = [
-            Image.new("RGB", (100, 100), "white"),
-            Image.new("RGB", (100, 100), "white"),
-        ]
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/ocr/pdf",
-                files={"file": ("test.pdf", b"%PDF-fake", "application/pdf")},
-            )
+    mock_doc = MagicMock()
+    mock_doc.__len__ = MagicMock(return_value=2)
+    mock_doc.__getitem__ = MagicMock(side_effect=lambda i: MagicMock())
+
+    with patch("local_ocr.app.open_pdf", return_value=mock_doc):
+        with patch(
+            "local_ocr.app.pdf_page_to_image",
+            return_value=Image.new("RGB", (100, 100), "white"),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post(
+                    "/ocr/pdf",
+                    files={"file": ("test.pdf", b"%PDF-fake", "application/pdf")},
+                )
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["pages"]) == 2
     assert data["pages"][0]["page_number"] == 1
     assert data["pages"][1]["page_number"] == 2
     assert "$x^2 = 4$" in data["pages"][0]["markdown"]
+    assert data["output_path"] == "output/test/test.md"
 
 
 async def test_ocr_url_image(mock_engine):
@@ -95,18 +115,25 @@ async def test_ocr_url_image(mock_engine):
 async def test_ocr_url_pdf(mock_engine):
     from local_ocr.app import app
 
+    mock_doc = MagicMock()
+    mock_doc.__len__ = MagicMock(return_value=1)
+    mock_doc.__getitem__ = MagicMock(side_effect=lambda i: MagicMock())
+
     with patch("local_ocr.app.fetch_url") as mock_fetch:
         mock_fetch.return_value = {"type": "pdf", "data": b"%PDF-fake"}
 
-        with patch("local_ocr.app.pdf_to_images") as mock_pdf:
-            mock_pdf.return_value = [Image.new("RGB", (100, 100), "white")]
-            transport = ASGITransport(app=app)
-            async with AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as client:
-                resp = await client.post(
-                    "/ocr/url", json={"url": "http://example.com/doc.pdf"}
-                )
+        with patch("local_ocr.app.open_pdf", return_value=mock_doc):
+            with patch(
+                "local_ocr.app.pdf_page_to_image",
+                return_value=Image.new("RGB", (100, 100), "white"),
+            ):
+                transport = ASGITransport(app=app)
+                async with AsyncClient(
+                    transport=transport, base_url="http://test"
+                ) as client:
+                    resp = await client.post(
+                        "/ocr/url", json={"url": "http://example.com/doc.pdf"}
+                    )
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["pages"]) == 1

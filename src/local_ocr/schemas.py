@@ -9,6 +9,7 @@ class Page(BaseModel):
 
 class OCRResponse(BaseModel):
     pages: list[Page]
+    output_path: str | None = None
 
 
 class URLRequest(BaseModel):
