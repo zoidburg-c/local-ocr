@@ -1,10 +1,9 @@
+# tests/test_app.py
 from unittest.mock import patch, MagicMock
 import pytest
 from httpx import AsyncClient, ASGITransport
 from PIL import Image
 import io
-
-from local_ocr.schemas import Element
 
 
 def _make_test_image_bytes() -> bytes:
@@ -14,27 +13,16 @@ def _make_test_image_bytes() -> bytes:
     return buf.getvalue()
 
 
-def _mock_elements():
-    return [
-        Element(type="text", content="hello", position=[0, 0, 50, 20], score=0.95),
-        Element(
-            type="formula",
-            content="x^2",
-            latex="x^{2}",
-            position=[0, 30, 50, 20],
-            score=0.9,
-        ),
-    ]
+MOCK_MARKDOWN = "# Question 1\n\nSolve $x^2 = 4$\n\n$$x = \\pm 2$$"
 
 
 @pytest.fixture
 def mock_engine():
     with patch("local_ocr.app.engine") as mock:
-        mock.recognize_image.return_value = _mock_elements()
+        mock.recognize_image.return_value = MOCK_MARKDOWN
         yield mock
 
 
-@pytest.mark.asyncio
 async def test_health():
     from local_ocr.app import app
 
@@ -42,10 +30,10 @@ async def test_health():
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/health")
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
+    data = resp.json()
+    assert data["status"] == "ok"
 
 
-@pytest.mark.asyncio
 async def test_ocr_image(mock_engine):
     from local_ocr.app import app
 
@@ -58,17 +46,18 @@ async def test_ocr_image(mock_engine):
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["pages"]) == 1
-    assert len(data["pages"][0]["elements"]) == 2
-    assert data["pages"][0]["elements"][0]["type"] == "text"
-    assert data["pages"][0]["elements"][1]["latex"] == "x^{2}"
+    assert data["pages"][0]["page_number"] == 1
+    assert "$x^2 = 4$" in data["pages"][0]["markdown"]
 
 
-@pytest.mark.asyncio
 async def test_ocr_pdf(mock_engine):
     from local_ocr.app import app
 
     with patch("local_ocr.app.pdf_to_images") as mock_pdf:
-        mock_pdf.return_value = [Image.new("RGB", (100, 100), "white")]
+        mock_pdf.return_value = [
+            Image.new("RGB", (100, 100), "white"),
+            Image.new("RGB", (100, 100), "white"),
+        ]
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.post(
@@ -77,10 +66,12 @@ async def test_ocr_pdf(mock_engine):
             )
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data["pages"]) == 1
+    assert len(data["pages"]) == 2
+    assert data["pages"][0]["page_number"] == 1
+    assert data["pages"][1]["page_number"] == 2
+    assert "$x^2 = 4$" in data["pages"][0]["markdown"]
 
 
-@pytest.mark.asyncio
 async def test_ocr_url_image(mock_engine):
     from local_ocr.app import app
 
@@ -91,7 +82,45 @@ async def test_ocr_url_image(mock_engine):
         }
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post("/ocr/url", json={"url": "http://example.com/img.png"})
+            resp = await client.post(
+                "/ocr/url", json={"url": "http://example.com/img.png"}
+            )
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["pages"]) == 1
+    assert "$x^2 = 4$" in data["pages"][0]["markdown"]
+
+
+async def test_ocr_url_pdf(mock_engine):
+    from local_ocr.app import app
+
+    with patch("local_ocr.app.fetch_url") as mock_fetch:
+        mock_fetch.return_value = {"type": "pdf", "data": b"%PDF-fake"}
+
+        with patch("local_ocr.app.pdf_to_images") as mock_pdf:
+            mock_pdf.return_value = [Image.new("RGB", (100, 100), "white")]
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/ocr/url", json={"url": "http://example.com/doc.pdf"}
+                )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["pages"]) == 1
+
+
+async def test_ocr_url_bad_url():
+    from local_ocr.app import app
+
+    with patch("local_ocr.app.engine"):
+        with patch("local_ocr.app.fetch_url", side_effect=Exception("Connection error")):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/ocr/url", json={"url": "http://bad-url.example.com"}
+                )
+    assert resp.status_code == 400

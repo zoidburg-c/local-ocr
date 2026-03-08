@@ -1,3 +1,4 @@
+# src/local_ocr/app.py
 import io
 import tempfile
 from contextlib import asynccontextmanager
@@ -19,7 +20,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Local OCR", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Local OCR", version="0.2.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -31,8 +32,8 @@ async def health():
 async def ocr_image(file: UploadFile = File(...)):
     contents = await file.read()
     image = Image.open(io.BytesIO(contents))
-    elements = engine.recognize_image(image)
-    return OCRResponse(pages=[Page(page_number=1, elements=elements)])
+    markdown = engine.recognize_image(image)
+    return OCRResponse(pages=[Page(page_number=1, markdown=markdown)])
 
 
 @app.post("/ocr/pdf", response_model=OCRResponse)
@@ -45,8 +46,8 @@ async def ocr_pdf(file: UploadFile = File(...)):
 
     pages = []
     for i, img in enumerate(images, start=1):
-        elements = engine.recognize_image(img)
-        pages.append(Page(page_number=i, elements=elements))
+        markdown = engine.recognize_image(img)
+        pages.append(Page(page_number=i, markdown=markdown))
     return OCRResponse(pages=pages)
 
 
@@ -58,8 +59,8 @@ async def ocr_url(request: URLRequest):
         raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {e}")
 
     if result["type"] == "image":
-        elements = engine.recognize_image(result["data"])
-        return OCRResponse(pages=[Page(page_number=1, elements=elements)])
+        markdown = engine.recognize_image(result["data"])
+        return OCRResponse(pages=[Page(page_number=1, markdown=markdown)])
 
     # PDF
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
@@ -69,6 +70,6 @@ async def ocr_url(request: URLRequest):
 
     pages = []
     for i, img in enumerate(images, start=1):
-        elements = engine.recognize_image(img)
-        pages.append(Page(page_number=i, elements=elements))
+        markdown = engine.recognize_image(img)
+        pages.append(Page(page_number=i, markdown=markdown))
     return OCRResponse(pages=pages)
