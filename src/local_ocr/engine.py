@@ -20,7 +20,7 @@ OLMOCR_PROMPT = (
     "rotation_correction, is_table, and is_diagram parameters."
 )
 
-_FRONT_MATTER_RE = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
+_FRONT_MATTER_RE = re.compile(r"^---\s*\n.*?\n---\s*\n?", re.DOTALL)
 _FIGURE_RE = re.compile(
     r"!\[([^\]]*)\]\(page_(\d+)_(\d+)_(\d+)_(\d+)\.png\)"
 )
@@ -95,20 +95,24 @@ def _inference_size(original: tuple[int, int]) -> tuple[int, int]:
     return (int(w * scale), int(h * scale))
 
 
-_FIGURE_PADDING_PTS = 10  # padding around detected figure regions in PDF points
+_FIGURE_PADDING_PTS = 15  # padding around detected figure regions in PDF points
+_RASTER_PAD_FRAC = 0.30   # expand model's estimate by 30% on each side for raster crops
 _MIN_GRAPHIC_SIZE = 15  # ignore images/drawings smaller than this (pixels or pts)
+_MAX_PAGE_COVERAGE = 0.6  # ignore elements covering more than 60% of page area
 
 
 def _detect_figure_regions(pdf_page) -> list:
     """Detect figure regions on a PDF page by clustering graphical elements.
 
-    Returns a list of fitz.Rect bounding boxes, one per detected figure.
+    Skips full-page images (scanned pages) and elements that cover most of the
+    page.  Returns a list of fitz.Rect bounding boxes, one per detected figure.
     """
     import fitz as _fitz
 
     rects: list = []
+    page_area = pdf_page.rect.width * pdf_page.rect.height
 
-    # Collect image rects (skip tiny ones like 2x2 spacer images)
+    # Collect image rects (skip tiny and full-page images)
     doc = pdf_page.parent
     for img_info in pdf_page.get_images(full=True):
         xref = img_info[0]
@@ -116,15 +120,23 @@ def _detect_figure_regions(pdf_page) -> list:
         if pix.width < _MIN_GRAPHIC_SIZE or pix.height < _MIN_GRAPHIC_SIZE:
             continue
         for r in pdf_page.get_image_rects(xref):
-            if not r.is_empty and not r.is_infinite:
-                rects.append(r)
+            if r.is_empty or r.is_infinite:
+                continue
+            # Skip images that cover most of the page (scanned pages)
+            if (r.width * r.height) / page_area > _MAX_PAGE_COVERAGE:
+                continue
+            rects.append(r)
 
-    # Collect drawing rects
+    # Collect drawing rects (skip page-spanning elements like borders)
     for d in pdf_page.get_drawings():
         r = d["rect"]
-        if not r.is_empty and not r.is_infinite:
-            if r.width >= _MIN_GRAPHIC_SIZE or r.height >= _MIN_GRAPHIC_SIZE:
-                rects.append(r)
+        if r.is_empty or r.is_infinite:
+            continue
+        if r.width < _MIN_GRAPHIC_SIZE and r.height < _MIN_GRAPHIC_SIZE:
+            continue
+        if (r.width * r.height) / page_area > _MAX_PAGE_COVERAGE:
+            continue
+        rects.append(r)
 
     if not rects:
         return []
@@ -162,6 +174,12 @@ def _detect_figure_regions(pdf_page) -> list:
             if not merged:
                 new_clusters.append(c)
         clusters = new_clusters
+
+    # Discard clusters that cover too much of the page
+    clusters = [
+        c for c in clusters
+        if (c.width * c.height) / page_area <= _MAX_PAGE_COVERAGE
+    ]
 
     return clusters
 
@@ -201,26 +219,21 @@ def extract_figures(
             int(match.group(5)),
         )
 
-        if pdf_page is not None:
+        if pdf_page is not None and detected_regions:
+            # Vector PDF with detected graphical elements — render from PDF
             page_rect = pdf_page.rect
             sx = page_rect.width / inf_w
             sy = page_rect.height / inf_h
-            # Model's estimated region in PDF points
             model_rect = _fitz.Rect(
                 mx * sx, my * sy, (mx + mw) * sx, (my + mh) * sy
             )
 
-            # Find the detected region that best overlaps the model's estimate
-            clip = model_rect  # fallback
-            if detected_regions:
-                best_overlap = 0.0
-                for region in detected_regions:
-                    intersection = model_rect & region
-                    if not intersection.is_empty:
-                        overlap_area = intersection.width * intersection.height
-                        if overlap_area > best_overlap:
-                            best_overlap = overlap_area
-                            clip = region
+            # Union all detected regions that overlap the model's estimate
+            clip = model_rect
+            for region in detected_regions:
+                intersection = model_rect & region
+                if not intersection.is_empty:
+                    clip = clip | region  # union
 
             # Add padding and clamp to page
             clip = _fitz.Rect(
@@ -236,15 +249,18 @@ def extract_figures(
             pix = pdf_page.get_pixmap(matrix=mat, clip=clip)
             cropped = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         else:
-            # Fallback: crop from raster image with coordinate scaling
+            # Scanned PDF or plain image — crop from raster with adaptive padding
             orig_w, orig_h = page_image.size
             sx = orig_w / inf_w
             sy = orig_h / inf_h
+            # Use percentage-based expansion for model's approximate coordinates
+            pad_x = int(mw * sx * _RASTER_PAD_FRAC)
+            pad_y = int(mh * sy * _RASTER_PAD_FRAC)
             crop_box = (
-                max(0, int(mx * sx)),
-                max(0, int(my * sy)),
-                min(orig_w, int((mx + mw) * sx)),
-                min(orig_h, int((my + mh) * sy)),
+                max(0, int(mx * sx) - pad_x),
+                max(0, int(my * sy) - pad_y),
+                min(orig_w, int((mx + mw) * sx) + pad_x),
+                min(orig_h, int((my + mh) * sy) + pad_y),
             )
             cropped = page_image.crop(crop_box)
 

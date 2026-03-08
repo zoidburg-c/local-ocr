@@ -28,6 +28,13 @@ def test_strip_yaml_front_matter_no_front_matter():
     assert result == text
 
 
+def test_strip_yaml_front_matter_only():
+    """Front matter with no trailing content (blank pages)."""
+    text = '---\nprimary_language: None\nis_table: False\n---'
+    result = _strip_yaml_front_matter(text)
+    assert result == ""
+
+
 @patch("local_ocr.engine.AutoProcessor")
 @patch("local_ocr.engine.Qwen2_5_VLForConditionalGeneration")
 def test_recognize_image(mock_model_cls, mock_proc_cls):
@@ -186,14 +193,16 @@ def test_wrap_multiline_display_math_skips_single_line():
 
 
 def test_extract_figures_raster_fallback():
-    """When no pdf_page, crops from raster with coordinate scaling."""
+    """When no pdf_page, crops from raster with coordinate scaling and padding."""
     markdown = "Some text\n![A graph](page_100_200_300_150.png)\nMore text"
     image = Image.new("RGB", (800, 600), "white")
     updated, figures = extract_figures(markdown, image, page_num=3)
     assert "![A graph](page3_fig1.png)" in updated
     assert len(figures) == 1
     assert figures[0][0] == "page3_fig1.png"
-    assert figures[0][1].size == (300, 150)
+    # Crop includes padding, so it's larger than the raw coordinates
+    assert figures[0][1].size[0] > 300
+    assert figures[0][1].size[1] > 150
 
 
 def test_extract_figures_raster_scales_coordinates():
